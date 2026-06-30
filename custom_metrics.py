@@ -1,0 +1,159 @@
+"""Custom fairness metrics registered on top of the built-in set.
+
+Add new metrics here by defining a compute function and calling register_metric.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from metric_registry import MetricSpec, register_metric, safe_divide, odds_ratio_to_q
+
+
+def _odds_ratio_to_y(or_val: np.ndarray) -> np.ndarray:
+    sqrt_or = np.sqrt(np.where(or_val >= 0, or_val, np.nan))
+    denom = sqrt_or + 1.0
+    out = np.full_like(or_val, np.nan, dtype=np.float64)
+    np.divide(sqrt_or - 1.0, denom, out=out, where=denom != 0)
+    return out
+
+
+def _marginal_prediction_table(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    return (
+        np.asarray(df["j_tp"] + df["j_fp"], dtype=np.float64),
+        np.asarray(df["i_tp"] + df["i_fp"], dtype=np.float64),
+        np.asarray(df["j_tn"] + df["j_fn"], dtype=np.float64),
+        np.asarray(df["i_tn"] + df["i_fn"], dtype=np.float64),
+    )
+
+
+def fairness_phi(df: pd.DataFrame) -> np.ndarray:
+    n11, n10, n01, n00 = _marginal_prediction_table(df)
+    n1d = n11 + n10
+    n0d = n01 + n00
+    nd1 = n11 + n01
+    nd0 = n10 + n00
+    denom = np.sqrt(np.where(n1d * n0d * nd1 * nd0 > 0, n1d * n0d * nd1 * nd0, np.nan))
+    return safe_divide(n11 * n00 - n10 * n01, denom)
+
+
+def marginal_q_association(df: pd.DataFrame) -> np.ndarray:
+    n11, n10, n01, n00 = _marginal_prediction_table(df)
+    ad = n11 * n00
+    bc = n10 * n01
+    return safe_divide(ad - bc, ad + bc)
+
+
+def marginal_y_association(df: pd.DataFrame) -> np.ndarray:
+    n11, n10, n01, n00 = _marginal_prediction_table(df)
+    sqrt_ad = np.sqrt(np.where(n11 * n00 >= 0, n11 * n00, np.nan))
+    sqrt_bc = np.sqrt(np.where(n10 * n01 >= 0, n10 * n01, np.nan))
+    return safe_divide(sqrt_ad - sqrt_bc, sqrt_ad + sqrt_bc)
+
+
+def conditional_q_association(df: pd.DataFrame, smoothing: bool = True) -> np.ndarray:
+    kappa = 0.5 if smoothing else 0.0
+    a1 = np.asarray(df["i_tp"], dtype=np.float64)
+    b1 = np.asarray(df["j_tp"], dtype=np.float64)
+    c1 = np.asarray(df["i_fn"], dtype=np.float64)
+    d1 = np.asarray(df["j_fn"], dtype=np.float64)
+    a0 = np.asarray(df["i_fp"], dtype=np.float64)
+    b0 = np.asarray(df["j_fp"], dtype=np.float64)
+    c0 = np.asarray(df["i_tn"], dtype=np.float64)
+    d0 = np.asarray(df["j_tn"], dtype=np.float64)
+    or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
+    or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
+    q1 = odds_ratio_to_q(or1)
+    q0 = odds_ratio_to_q(or0)
+    result = np.full(len(df), np.nan, dtype=np.float64)
+    valid = ~(np.isnan(q0) | np.isnan(q1))
+    result[valid] = np.sqrt((q0[valid] ** 2 + q1[valid] ** 2) / 2.0)
+    return result
+
+
+def conditional_y_association(df: pd.DataFrame, smoothing: bool = True) -> np.ndarray:
+    kappa = 0.5 if smoothing else 0.0
+    a1 = np.asarray(df["i_tp"], dtype=np.float64)
+    b1 = np.asarray(df["j_tp"], dtype=np.float64)
+    c1 = np.asarray(df["i_fn"], dtype=np.float64)
+    d1 = np.asarray(df["j_fn"], dtype=np.float64)
+    a0 = np.asarray(df["i_fp"], dtype=np.float64)
+    b0 = np.asarray(df["j_fp"], dtype=np.float64)
+    c0 = np.asarray(df["i_tn"], dtype=np.float64)
+    d0 = np.asarray(df["j_tn"], dtype=np.float64)
+    or1 = safe_divide((a1 + kappa) * (d1 + kappa), (b1 + kappa) * (c1 + kappa))
+    or0 = safe_divide((a0 + kappa) * (d0 + kappa), (b0 + kappa) * (c0 + kappa))
+    y1 = _odds_ratio_to_y(or1)
+    y0 = _odds_ratio_to_y(or0)
+    result = np.full(len(df), np.nan, dtype=np.float64)
+    valid = ~(np.isnan(y0) | np.isnan(y1))
+    result[valid] = np.sqrt((y0[valid] ** 2 + y1[valid] ** 2) / 2.0)
+    return result
+
+
+register_metric(MetricSpec(
+    key="fairness_phi",
+    label="Fairness Phi",
+    category="fairness",
+    sort_order=100,
+    description=(
+        "Fairness Phi (Φ): point-biserial φ coefficient between ŷ and S. "
+        "Zero iff ŷ ⊥ S. Range [−1, 1]; sign indicates direction of association."
+    ),
+    formula=r"\Phi = \frac{n_{11}n_{00}-n_{10}n_{01}}{\sqrt{n_{1\cdot}n_{0\cdot}n_{\cdot1}n_{\cdot0}}}",
+    compute=fairness_phi,
+))
+
+register_metric(MetricSpec(
+    key="marginal_q_association",
+    label="Marginal Q Association",
+    category="fairness",
+    sort_order=101,
+    description=(
+        "Yule-Q on the marginal 2×2 table of (Ŷ, S). "
+        "Zero iff Ŷ ⊥ S. Bounded in [−1, 1]; sign indicates direction of disparity."
+    ),
+    formula=r"Q = \frac{n_{11}n_{00}-n_{10}n_{01}}{n_{11}n_{00}+n_{10}n_{01}}",
+    compute=marginal_q_association,
+))
+
+register_metric(MetricSpec(
+    key="marginal_y_association",
+    label="Marginal Y Association",
+    category="fairness",
+    sort_order=102,
+    description=(
+        "Yule's Y on the marginal 2×2 table of (Ŷ, S). "
+        "Y = (√(ad) − √(bc)) / (√(ad) + √(bc)). "
+        "Zero iff Ŷ ⊥ S. Bounded in [−1, 1]; monotone transform of Q."
+    ),
+    formula=r"Y = \frac{\sqrt{n_{11}n_{00}}-\sqrt{n_{10}n_{01}}}{\sqrt{n_{11}n_{00}}+\sqrt{n_{10}n_{01}}}",
+    compute=marginal_y_association,
+))
+
+register_metric(MetricSpec(
+    key="conditional_q_association",
+    label="Conditional Q Association",
+    category="fairness",
+    sort_order=103,
+    description=(
+        "CQA: RMS of Yule-Q within each label stratum Y=y. "
+        "Bounded in [0, 1). Uses Haldane-Anscombe +0.5 smoothing by default."
+    ),
+    formula=r"\mathrm{CQA} = \sqrt{\frac{Q_0^2+Q_1^2}{2}},\quad Q_y=\frac{\mathrm{OR}_y-1}{\mathrm{OR}_y+1}",
+    compute=conditional_q_association,
+))
+
+register_metric(MetricSpec(
+    key="conditional_y_association",
+    label="Conditional Y Association",
+    category="fairness",
+    sort_order=104,
+    description=(
+        "CYA: RMS of Yule's Y within each label stratum Y=y. "
+        "Bounded in [0, 1). Uses Haldane-Anscombe +0.5 smoothing by default."
+    ),
+    formula=r"\mathrm{CYA} = \sqrt{\frac{Y_0^2+Y_1^2}{2}},\quad Y_y=\frac{\sqrt{\mathrm{OR}_y}-1}{\sqrt{\mathrm{OR}_y}+1}",
+    compute=conditional_y_association,
+))

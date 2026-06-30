@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local app output
+figures/
+out/
+exports/
+*.csv
+*.png
+
+# Data
+data/*
+!data/
+!data/adult.data
+Set(08,56).bin
